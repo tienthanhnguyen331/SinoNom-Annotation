@@ -1333,10 +1333,12 @@ element.addEventListener('pointerdown', event => {
   if (event.button !== 0) return;
   const chip = event.target.closest('[data-order-chip]');
   if (chip && [3, 4].includes(props.value.step)) {
+    // Selection must not depend on the alignment synchronization gate.
+    // Only reordering requires the verified token/box mapping below.
+    activateOrderChip(chip);
     const container = chip.closest('.order-chips');
     if (!alignmentStateReady || container !== alignmentContainer
         || container?.dataset.alignmentReady !== 'true') return;
-    activateOrderChip(chip);
     if (orderDrag) cleanupOrderDrag('superseded', false);
     orderDrag = {
       active: true, chip, container, pointerId: event.pointerId,
