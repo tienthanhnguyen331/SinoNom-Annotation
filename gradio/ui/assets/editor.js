@@ -248,7 +248,7 @@ const syncExternalControls = () => {
     const isMissing = Boolean(chip?.classList.contains('missing') || chip?.dataset.character === '[MISS]');
     const isExcluded = Boolean(chip?.classList.contains('excluded'));
     const allowed = Boolean(chip && !isMissing && !isExcluded && active
-      && !['□', '@'].includes(chip.dataset.character) && !active.unknown);
+      && !['□', '@'].includes(chip.dataset.character));
     const target = allowed && active.suspicious ? 'True' : 'False';
     root.querySelectorAll('#suspicious-toggle input').forEach(input => {
       if (input.value === target && !input.checked) {
@@ -492,10 +492,13 @@ const updateCanvasLabels = () => {
       const publicBox = props.value.step !== 6;
       const assignedCharacter = [3,4].includes(props.value.step)
         ? characterByBoxId.get(String(id)) : null;
-      const labelText = publicBox && hasOrder ? String(b.order) : '';
-      text.replaceChildren();
+      const labelText = publicBox && hasOrder
+        ? `${b.order}${assignedCharacter ? ` ${assignedCharacter}` : ''}` : '';
+      text.textContent = '';
       if (labelText) {
-        if (assignedCharacter && id === activeBoxId && [3,4].includes(props.value.step)) {
+        const activeCallout = (typeof activeBoxId !== 'undefined'
+          && id === activeBoxId && [3,4].includes(props.value.step));
+        if (assignedCharacter && activeCallout) {
           const labelWidth = Math.max(fontSize * 1.6, assignedCharacter.length * fontSize * 0.9);
           const placeRight = box[2] + labelWidth + fontSize * 0.5 < props.value.width;
           const x = placeRight ? box[2] + fontSize * 0.35 : box[0] - fontSize * 0.35;
@@ -503,7 +506,7 @@ const updateCanvasLabels = () => {
           text.setAttribute('x', x);
           text.setAttribute('y', y);
           text.setAttribute('text-anchor', placeRight ? 'start' : 'end');
-          text.classList.add('active-character-callout');
+          text.classList.toggle('active-character-callout', true);
           const numberLine = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
           numberLine.setAttribute('x', x);
           numberLine.setAttribute('font-weight', '700');
@@ -513,16 +516,17 @@ const updateCanvasLabels = () => {
           characterLine.setAttribute('dy', String(fontSize * 1.1));
           characterLine.setAttribute('font-weight', '700');
           characterLine.textContent = assignedCharacter;
-          text.append(numberLine, characterLine);
+          text.appendChild(numberLine);
+          text.appendChild(characterLine);
         } else {
-          text.classList.remove('active-character-callout');
+          text.classList.toggle('active-character-callout', false);
           text.setAttribute('x', centerX);
           text.setAttribute('y', Math.max(fontSize, box[1] - 3 * unit));
           text.setAttribute('text-anchor', 'middle');
           text.textContent = labelText;
         }
       } else {
-        text.classList.remove('active-character-callout');
+        text.classList.toggle('active-character-callout', false);
       }
       g.dataset.order = hasOrder ? String(b.order) : '';
       const title = g.querySelector(':scope > title');
@@ -746,20 +750,18 @@ resizeObserver.observe(element);
 const sidebar = root.querySelector('#control-panel');
 if (sidebar) resizeObserver.observe(sidebar);
 
-const statusTargetIds = () => selectedIds.size ? [...selectedIds] : (activeBoxId ? [activeBoxId] : []);
-const statusChipFor = id => element.querySelector(
-  `[data-order-chip][data-assigned-box-id="${id}"]`);
-
 root.addEventListener('change', event => {
   if (syncingStatusControl) return;
   if (handleAnnotationColor(event.target)) return;
   const suspicious = event.target.closest('#suspicious-toggle input');
   if (suspicious && props.value.step === 4 && activeBoxId) {
     const enabled = suspicious.value.toLowerCase() === 'true';
-    statusTargetIds().forEach(id => {
-      const box = localBoxes[id], chip = statusChipFor(id);
+    const targets = selectedIds.size ? [...selectedIds] : [activeBoxId];
+    targets.forEach(id => {
+      const box = localBoxes[id];
+      const chip = element.querySelector(`[data-order-chip][data-assigned-box-id="${id}"]`);
       if (!box || !chip || chip.classList.contains('missing') || chip.classList.contains('excluded')
-          || ['□', '@'].includes(chip.dataset.character) || box.unknown) return;
+          || ['□', '@'].includes(chip.dataset.character)) return;
       box.suspicious = enabled;
       if (enabled) box.unknown = false;
     });
@@ -770,7 +772,8 @@ root.addEventListener('change', event => {
   }
   const levelInput = event.target.closest('#damage-level-radio input');
   if (levelInput && props.value.step === 4 && activeBoxId) {
-    statusTargetIds().forEach(id => {
+    const targets = selectedIds.size ? [...selectedIds] : [activeBoxId];
+    targets.forEach(id => {
       const box = localBoxes[id];
       if (box?.status === 'damaged' && ['1', '2', '3'].includes(levelInput.value)) {
         box.damage_level = Number(levelInput.value);
@@ -782,8 +785,9 @@ root.addEventListener('change', event => {
   }
   const input = event.target.closest('#status-radio input');
   if (input && props.value.step === 4 && activeBoxId) {
-    statusTargetIds().forEach(id => {
-      const chip = statusChipFor(id);
+    const targets = selectedIds.size ? [...selectedIds] : [activeBoxId];
+    targets.forEach(id => {
+      const chip = element.querySelector(`[data-order-chip][data-assigned-box-id="${id}"]`);
       if (chip?.classList.contains('missing') || chip?.classList.contains('excluded')) return;
       const box = localBoxes[id];
       if (box) renderLocalStatus(id, input.value, box.unknown);
@@ -796,8 +800,10 @@ root.addEventListener('change', event => {
     const flagInput = event.target.closest(`${selector} input`);
     if (flagInput && props.value.step === 4 && activeBoxId) {
       const enabled = flagInput.value.toLowerCase() === 'true';
-      statusTargetIds().forEach(id => {
-        const box = localBoxes[id], chip = statusChipFor(id);
+      const targets = selectedIds.size ? [...selectedIds] : [activeBoxId];
+      targets.forEach(id => {
+        const box = localBoxes[id];
+        const chip = element.querySelector(`[data-order-chip][data-assigned-box-id="${id}"]`);
         if (!box || groupFor(id)?.querySelector('rect')?.dataset.missing === '1'
             || chip?.classList.contains('missing') || chip?.classList.contains('excluded')
             || ['□', '@'].includes(chip?.dataset.character)) return;
@@ -815,8 +821,10 @@ root.addEventListener('change', event => {
   const unknownInput = event.target.closest('#unknown-radio input');
   if (unknownInput && props.value.step === 4 && activeBoxId) {
     const isUnknown = unknownInput.value === 'True' || unknownInput.value === 'true';
-    statusTargetIds().forEach(id => {
-      const currentBox = localBoxes[id], chip = statusChipFor(id);
+    const targets = selectedIds.size ? [...selectedIds] : [activeBoxId];
+    targets.forEach(id => {
+      const currentBox = localBoxes[id];
+      const chip = element.querySelector(`[data-order-chip][data-assigned-box-id="${id}"]`);
       if (!currentBox || currentBox.status !== 'damaged'
           || ['□', '@'].includes(chip?.dataset.character)
           || chip?.classList.contains('missing') || chip?.classList.contains('excluded')) return;
@@ -1041,6 +1049,8 @@ const updateExcludedChips = container => {
   const chips = [...container.querySelectorAll('[data-order-chip]')];
   const count = Number(container.dataset.excludedCount || 0);
   chips.forEach((chip, index) => {
+    const orderLabel = chip.querySelector('.tile-order');
+    if (orderLabel) orderLabel.textContent = String(index + 1);
     const excluded = count > 0 && index >= chips.length - count;
     chip.classList.toggle('excluded', excluded);
     chip.title = excluded ? 'Excluded from annotation data' : chip.dataset.character;
@@ -1574,6 +1584,7 @@ element.addEventListener('pointercancel', () => {
   else if (state.kind === 'resize') drawLocalBox(state.id, state.box);
   else if (state.kind === 'crop') drawPreview(groupFor('crop'), state.box);
   else state.rect?.remove();
+  if (state.kind === 'drag' || state.kind === 'resize') updateCanvasLabels();
   if (state.kind === 'marquee') setSelection([...state.baseline], [...state.baseline].at(-1));
 });
 

@@ -1008,7 +1008,10 @@ def create_app(options):
         def apply_content_draft(ctx, path, value, draft):
             try:
                 fields = json.loads(draft or '{}')
-                key = json.dumps(path, ensure_ascii=False)
+                parsed_path = json.loads(path) if isinstance(path, str) else path
+                if not isinstance(parsed_path, list):
+                    raise ValueError('The selected content section is invalid.')
+                key = json.dumps(parsed_path, ensure_ascii=False)
                 if (not isinstance(fields, dict) or key not in fields
                         or not isinstance(value, str)):
                     raise ValueError('Select a content section and enter text first.')
