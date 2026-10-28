@@ -3,6 +3,7 @@ from copy import deepcopy
 from pathlib import Path
 import hashlib
 import json
+import tempfile
 import zipfile
 
 from PIL import Image
@@ -31,6 +32,40 @@ def save_export_archive(annotations, content, output_dir, source_mismatches=None
         temporary.replace(archive)
     finally:
         temporary.unlink(missing_ok=True)
+    return archive
+
+
+def save_recovery_archive(annotations, content, output_dir, source_mismatches=None):
+    """Create a portable backup that includes incomplete per-image drafts."""
+    output = Path(output_dir)
+    state_dir = output / '.state' / 'drafts'
+    drafts = []
+    if state_dir.is_dir():
+        for path in sorted(state_dir.glob('*.json')):
+            document = read_json(path)
+            if (isinstance(document, dict)
+                    and document.get('format') == 'vietnamica-annotation-draft'):
+                drafts.append(document)
+    documents = {
+        'text_annotations.json': annotations or [],
+        'inscription_content.json': content or [],
+        'source_mismatches.json': source_mismatches or [],
+        'annotation_drafts.json': drafts,
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    archive = output / 'recovery_backup.zip'
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                suffix='.zip.tmp', dir=output, delete=False) as stream:
+            temporary = Path(stream.name)
+        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+            for name, data in documents.items():
+                bundle.writestr(name, json.dumps(data, ensure_ascii=False, indent=2))
+        temporary.replace(archive)
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
     return archive
 
 

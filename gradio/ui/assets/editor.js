@@ -2,6 +2,7 @@
 let pending = false, pendingAction = null, moving = null, orderDrag = null;
 let sortRequestSequence = 0;
 let suppressAlignmentClick = false, alignmentClickTimer = null;
+let draftCheckpointTimer = null;
 let syncingStatusControl = false;
 let syncingCoordinateControls = false;
 let isDirty = false, pendingSortSelectedRange = null, pendingSortOverwrite = null;
@@ -195,6 +196,13 @@ const setInputValue = (selector, value) => {
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
 };
+const scheduleDraftCheckpoint = serializedSnapshot => {
+  if (!isDirty || !props.value.image || ![3, 4, 6].includes(props.value.step)) return;
+  clearTimeout(draftCheckpointTimer);
+  draftCheckpointTimer = setTimeout(() => {
+    setInputValue('#draft-checkpoint-bridge', serializedSnapshot);
+  }, 450);
+};
 const syncExternalControls = () => {
   updateValidationSummary();
   const bridgeSnapshot = {
@@ -226,6 +234,7 @@ const syncExternalControls = () => {
   const board = element.querySelector('.workbench-board');
   if (board) board.dataset.localBoxesSnapshot = serializedSnapshot;
   setInputValue('#selection-bridge', serializedSnapshot);
+  scheduleDraftCheckpoint(serializedSnapshot);
   const active = activeBoxId && localBoxes[activeBoxId];
   if (props.value.step === 4 && !active) {
     root.querySelectorAll('#status-radio input, #unknown-radio input, #unavailable-font-radio input, #expert-prediction-radio input, #suspicious-toggle input, #damage-level-radio input')
@@ -238,7 +247,8 @@ const syncExternalControls = () => {
     activeTokenId = chip?.dataset.tokenId || null;
     const isMissing = Boolean(chip?.classList.contains('missing') || chip?.dataset.character === '[MISS]');
     const isExcluded = Boolean(chip?.classList.contains('excluded'));
-    const allowed = Boolean(chip && !isMissing && !isExcluded && active && chip.dataset.character !== '□');
+    const allowed = Boolean(chip && !isMissing && !isExcluded && active
+      && !['□', '@'].includes(chip.dataset.character) && !active.unknown);
     const target = allowed && active.suspicious ? 'True' : 'False';
     root.querySelectorAll('#suspicious-toggle input').forEach(input => {
       if (input.value === target && !input.checked) {
@@ -311,7 +321,7 @@ const syncExternalControls = () => {
           syncingStatusControl = true;
           try { input.click(); } finally { syncingStatusControl = false; }
         }
-        input.disabled = isMissing || isUnknownPlaceholder || (flag === 'unavailable_font' && isFontPlaceholder);
+        input.disabled = isMissing || isUnknownPlaceholder || isFontPlaceholder;
       });
     }
     const unknownRadioInputs = root.querySelectorAll('#unknown-radio input');
@@ -444,7 +454,10 @@ const renderSelection = (sync = true) => {
     }
   });
   element.querySelectorAll('[data-order-chip]').forEach(chip => {
-    chip.classList.remove('selected-chip');
+    const id = chip.dataset.assignedBoxId;
+    chip.classList.toggle('selected-chip',
+      Boolean(activeTokenId && chip.dataset.tokenId === activeTokenId)
+      || Boolean(id && selectedIds.has(id)));
   });
   if (sync) syncExternalControls();
 };
@@ -473,17 +486,44 @@ const updateCanvasLabels = () => {
       const fontSize = Math.max(10 * unit, Math.min(bw, bh) * 0.30);
       const strokeWidth = Math.max(0.5, fontSize * 0.1);
       const centerX = (box[0] + box[2]) / 2;
-      text.setAttribute('x', centerX);
-      text.setAttribute('y', Math.max(fontSize, box[1] - 3 * unit));
-      text.setAttribute('text-anchor', 'middle');
       text.setAttribute('font-size', fontSize);
       text.setAttribute('stroke-width', strokeWidth);
       text.setAttribute('fill', props.value.step >= 4 ? textColor(b) : annotationColor || '#ffffff');
       const publicBox = props.value.step !== 6;
-      const assignedCharacter = props.value.step === 4 ? characterByBoxId.get(String(id)) : null;
-      const labelText = publicBox ? (hasOrder
-        ? `${b.order}${assignedCharacter ? ` ${assignedCharacter}` : ''}` : '') : '';
-      text.textContent = labelText;
+      const assignedCharacter = [3,4].includes(props.value.step)
+        ? characterByBoxId.get(String(id)) : null;
+      const labelText = publicBox && hasOrder ? String(b.order) : '';
+      text.replaceChildren();
+      if (labelText) {
+        if (assignedCharacter && id === activeBoxId && [3,4].includes(props.value.step)) {
+          const labelWidth = Math.max(fontSize * 1.6, assignedCharacter.length * fontSize * 0.9);
+          const placeRight = box[2] + labelWidth + fontSize * 0.5 < props.value.width;
+          const x = placeRight ? box[2] + fontSize * 0.35 : box[0] - fontSize * 0.35;
+          const y = (box[1] + box[3]) / 2 - fontSize * 0.35;
+          text.setAttribute('x', x);
+          text.setAttribute('y', y);
+          text.setAttribute('text-anchor', placeRight ? 'start' : 'end');
+          text.classList.add('active-character-callout');
+          const numberLine = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+          numberLine.setAttribute('x', x);
+          numberLine.setAttribute('font-weight', '700');
+          numberLine.textContent = String(b.order);
+          const characterLine = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+          characterLine.setAttribute('x', x);
+          characterLine.setAttribute('dy', String(fontSize * 1.1));
+          characterLine.setAttribute('font-weight', '700');
+          characterLine.textContent = assignedCharacter;
+          text.append(numberLine, characterLine);
+        } else {
+          text.classList.remove('active-character-callout');
+          text.setAttribute('x', centerX);
+          text.setAttribute('y', Math.max(fontSize, box[1] - 3 * unit));
+          text.setAttribute('text-anchor', 'middle');
+          text.textContent = labelText;
+        }
+      } else {
+        text.classList.remove('active-character-callout');
+      }
       g.dataset.order = hasOrder ? String(b.order) : '';
       const title = g.querySelector(':scope > title');
       if (title && props.value.step === 3) {
@@ -568,7 +608,7 @@ const hydrateLocalState = () => {
     if (preserveOrder && localTokenOrder.length) arrangeOrder(container, localTokenOrder);
     updateExcludedChips(container);
   });
-  if (props.value.step === 4) initializeAlignmentStateFromDOM();
+  if ([3,4].includes(props.value.step)) initializeAlignmentStateFromDOM();
   if (props.value.step === 4) {
     Object.entries(localBoxes).forEach(([id, box]) => renderLocalStatus(id, box.status, box.unknown));
   }
@@ -706,58 +746,85 @@ resizeObserver.observe(element);
 const sidebar = root.querySelector('#control-panel');
 if (sidebar) resizeObserver.observe(sidebar);
 
+const statusTargetIds = () => selectedIds.size ? [...selectedIds] : (activeBoxId ? [activeBoxId] : []);
+const statusChipFor = id => element.querySelector(
+  `[data-order-chip][data-assigned-box-id="${id}"]`);
+
 root.addEventListener('change', event => {
   if (syncingStatusControl) return;
   if (handleAnnotationColor(event.target)) return;
   const suspicious = event.target.closest('#suspicious-toggle input');
   if (suspicious && props.value.step === 4 && activeBoxId) {
-    const box = localBoxes[activeBoxId];
-    const chip = element.querySelector(`[data-order-chip][data-assigned-box-id="${activeBoxId}"]`);
-    if (!box || !chip || chip.classList.contains('missing') || chip.classList.contains('excluded')) return;
-    box.suspicious = suspicious.value.toLowerCase() === 'true';
-    if (box.suspicious) box.unknown = false;
+    const enabled = suspicious.value.toLowerCase() === 'true';
+    statusTargetIds().forEach(id => {
+      const box = localBoxes[id], chip = statusChipFor(id);
+      if (!box || !chip || chip.classList.contains('missing') || chip.classList.contains('excluded')
+          || ['□', '@'].includes(chip.dataset.character) || box.unknown) return;
+      box.suspicious = enabled;
+      if (enabled) box.unknown = false;
+    });
+    isDirty = true;
     renderSuspiciousPreview();
     renderSelection();
     return;
   }
   const levelInput = event.target.closest('#damage-level-radio input');
   if (levelInput && props.value.step === 4 && activeBoxId) {
-    const box = localBoxes[activeBoxId];
-    if (box?.status === 'damaged' && ['1', '2', '3'].includes(levelInput.value)) {
-      box.damage_level = Number(levelInput.value);
-    }
+    statusTargetIds().forEach(id => {
+      const box = localBoxes[id];
+      if (box?.status === 'damaged' && ['1', '2', '3'].includes(levelInput.value)) {
+        box.damage_level = Number(levelInput.value);
+      }
+    });
+    isDirty = true;
     syncExternalControls();
     return;
   }
   const input = event.target.closest('#status-radio input');
   if (input && props.value.step === 4 && activeBoxId) {
-    const currentBox = localBoxes[activeBoxId];
-    renderLocalStatus(activeBoxId, input.value, currentBox?.unknown);
+    statusTargetIds().forEach(id => {
+      const chip = statusChipFor(id);
+      if (chip?.classList.contains('missing') || chip?.classList.contains('excluded')) return;
+      const box = localBoxes[id];
+      if (box) renderLocalStatus(id, input.value, box.unknown);
+    });
+    isDirty = true;
     syncExternalControls();
     return;
   }
   for (const [flag, selector] of [['unavailable_font', '#unavailable-font-radio'], ['expert_prediction', '#expert-prediction-radio']]) {
     const flagInput = event.target.closest(`${selector} input`);
     if (flagInput && props.value.step === 4 && activeBoxId) {
-      const box = localBoxes[activeBoxId];
-      if (!box || groupFor(activeBoxId)?.querySelector('rect')?.dataset.missing === '1') return;
       const enabled = flagInput.value.toLowerCase() === 'true';
-      if (flag === 'expert_prediction' && enabled && !box[flag]) box.status = 'damaged';
-      box[flag] = enabled;
-      if (enabled) box.unknown = false;
-      renderLocalStatus(activeBoxId, box.status, box.unknown);
+      statusTargetIds().forEach(id => {
+        const box = localBoxes[id], chip = statusChipFor(id);
+        if (!box || groupFor(id)?.querySelector('rect')?.dataset.missing === '1'
+            || chip?.classList.contains('missing') || chip?.classList.contains('excluded')
+            || ['□', '@'].includes(chip?.dataset.character)) return;
+        if (flag === 'expert_prediction' && enabled && !box[flag]) box.status = 'damaged';
+        box[flag] = enabled;
+        if (enabled) box.unknown = false;
+        renderLocalStatus(id, box.status, box.unknown);
+      });
+      isDirty = true;
+      renderSelection();
       syncExternalControls();
       return;
     }
   }
   const unknownInput = event.target.closest('#unknown-radio input');
   if (unknownInput && props.value.step === 4 && activeBoxId) {
-    const currentBox = localBoxes[activeBoxId];
-    if (currentBox && currentBox.status === 'damaged') {
-      const isUnknown = unknownInput.value === 'True' || unknownInput.value === 'true';
-      renderLocalStatus(activeBoxId, 'damaged', isUnknown);
-      syncExternalControls();
-    }
+    const isUnknown = unknownInput.value === 'True' || unknownInput.value === 'true';
+    statusTargetIds().forEach(id => {
+      const currentBox = localBoxes[id], chip = statusChipFor(id);
+      if (!currentBox || currentBox.status !== 'damaged'
+          || ['□', '@'].includes(chip?.dataset.character)
+          || chip?.classList.contains('missing') || chip?.classList.contains('excluded')) return;
+      renderLocalStatus(id, 'damaged', isUnknown);
+    });
+    isDirty = true;
+    renderSelection();
+    syncExternalControls();
     return;
   }
 });
@@ -899,7 +966,11 @@ const drawImageResizePreview = (state, size) => {
 const setSelection = (ids, active = null, sync = true) => {
   selectedIds = new Set(ids.filter(id => localBoxes[id]));
   activeBoxId = active && localBoxes[active] ? active : selectedIds.values().next().value || null;
+  const chip = activeBoxId && element.querySelector(
+    `[data-order-chip][data-assigned-box-id="${activeBoxId}"]`);
+  activeTokenId = chip?.dataset.tokenId || null;
   renderSelection(sync);
+  updateCanvasLabels();
 };
 root.addEventListener('deselect-regions', () => setSelection([], null));
 const createOverlayRect = (svg, className) => {
@@ -921,7 +992,7 @@ const tokenOrderFromDOM = container => [...container.querySelectorAll('[data-ord
 const textSequenceFromDOM = container => [...container.querySelectorAll('[data-order-chip]')]
   .map(chip => chip.dataset.character);
 function alignmentDOMIsReady(container) {
-  if (!container || props.value.step !== 4) return false;
+  if (!container || ![3,4].includes(props.value.step)) return false;
   const chips = [...container.querySelectorAll('[data-order-chip]')];
   const tokenIds = chips.map(chip => chip.dataset.tokenId || '');
   const expectedIds = (props.value.alignmentTokenIds || []).map(String);
@@ -942,7 +1013,7 @@ function alignmentDOMIsReady(container) {
 }
 function initializeAlignmentStateFromDOM() {
   const container = element.querySelector('.order-chips');
-  if (!container || props.value.step !== 4) return false;
+  if (!container || ![3,4].includes(props.value.step)) return false;
   if (!alignmentDOMIsReady(container)) {
     container.dataset.alignmentReady = 'false';
     container.setAttribute('aria-busy', 'true');
@@ -1155,8 +1226,25 @@ const cleanupOrderDrag = (reason, commit = false) => {
       updateExcludedChips(state.container);
       localTextSequence = textSequenceFromDOM(state.container);
       localTokenOrder = tokenOrderFromDOM(state.container);
+      isDirty = true;
+      const assignedBoxId = state.chip.dataset.assignedBoxId;
+      activeTokenId = state.chip.dataset.tokenId || null;
+      selectedIds = new Set(assignedBoxId && localBoxes[assignedBoxId]
+        ? [assignedBoxId] : []);
+      activeBoxId = assignedBoxId && localBoxes[assignedBoxId] ? assignedBoxId : null;
       renderSelection();
+      updateCanvasLabels();
     }
+  } else if (commit) {
+    // A pointer release without movement is a selection action. Keep the
+    // aligned box and chip visibly linked in both annotation steps.
+    const assignedBoxId = state.chip.dataset.assignedBoxId;
+    activeTokenId = state.chip.dataset.tokenId || null;
+    selectedIds = new Set(assignedBoxId && localBoxes[assignedBoxId]
+      ? [assignedBoxId] : []);
+    activeBoxId = assignedBoxId && localBoxes[assignedBoxId] ? assignedBoxId : null;
+    renderSelection();
+    updateCanvasLabels();
   }
   if (state.captureTarget?.hasPointerCapture?.(state.pointerId)) {
     try { state.captureTarget.releasePointerCapture(state.pointerId); } catch (_) {}
@@ -1220,7 +1308,7 @@ element.addEventListener('pointerdown', event => {
   }
   if (event.button !== 0) return;
   const chip = event.target.closest('[data-order-chip]');
-  if (chip && props.value.step === 4) {
+  if (chip && [3, 4].includes(props.value.step)) {
     const container = chip.closest('.order-chips');
     if (!alignmentStateReady || container !== alignmentContainer
         || container?.dataset.alignmentReady !== 'true') return;
@@ -1245,14 +1333,20 @@ element.addEventListener('pointerdown', event => {
   const toggle = event.ctrlKey || event.metaKey;
   if ([3, 4, 5, 7].includes(mode)) {
     if (group) {
-      if (toggle && mode === 3) {
+      if (toggle && [3, 4].includes(mode)) {
         const next = new Set(selectedIds);
         if (next.has(id)) next.delete(id); else next.add(id);
         setSelection([...next], next.has(id) ? id : [...next].at(-1));
         event.preventDefault(); return;
       }
-      if (!selectedIds.has(id)) setSelection([id], id);
-      else { activeBoxId = id; renderSelection(); }
+      if (!selectedIds.has(id) || (mode === 4 && selectedIds.size > 1)) setSelection([id], id);
+      else {
+        activeBoxId = id;
+        const chip = element.querySelector(`[data-order-chip][data-assigned-box-id="${id}"]`);
+        activeTokenId = chip?.dataset.tokenId || null;
+        renderSelection();
+        updateCanvasLabels();
+      }
       if (mode !== 3) {
         event.preventDefault(); return;
       }
@@ -1447,12 +1541,14 @@ element.addEventListener('pointerup', event => {
       localBoxes[id].bbox = [...box];
     });
     isDirty = true;
+    updateCanvasLabels();
     syncExternalControls(); traceTransition('MOVE', beforeIds); return;
   }
   if (state.kind === 'resize' && state.result && state.result[2] > state.result[0] && state.result[3] > state.result[1]) {
     const beforeIds = Object.keys(localBoxes);
     localBoxes[state.id].bbox = [...state.result];
     isDirty = true;
+    updateCanvasLabels();
     syncExternalControls();
     traceTransition('RESIZE', beforeIds); return;
   }
@@ -1772,7 +1868,7 @@ window.addEventListener('keydown', event => {
 });
 
 const alignmentObserver = new MutationObserver(() => {
-  if (props.value.step !== 4) return;
+  if (![3, 4].includes(props.value.step)) return;
   const container = element.querySelector('.order-chips');
   const canvas = element.querySelector('.annotation-canvas');
   const groups = [...element.querySelectorAll('.annotation-canvas [data-box-id]')];

@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
@@ -114,6 +115,129 @@ class Workflow:
         self._source_records = None
         self._source_mtime_ns = None
         self._source_locations = None
+        self._image_fingerprints = {}
+
+    def _image_fingerprint(self, path):
+        path = Path(path).resolve()
+        stat = path.stat()
+        cache_key = (str(path), stat.st_size, stat.st_mtime_ns)
+        cached = self._image_fingerprints.get(cache_key)
+        if cached:
+            return cached
+        digest = hashlib.sha256()
+        with path.open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(chunk)
+        result = dict(sha256=digest.hexdigest(), size_bytes=stat.st_size)
+        self._image_fingerprints = {cache_key: result}
+        return result
+
+    def _draft_path(self, image_name):
+        key = hashlib.sha256(str(image_name).encode('utf-8')).hexdigest()
+        return self.output / '.state' / 'drafts' / f'{key}.json'
+
+    def save_draft(self, state):
+        """Durably checkpoint one in-progress image without marking it final."""
+        if not state.get('image') or not state.get('image_path'):
+            return None
+        image_path = Path(state['image_path']).resolve()
+        if not image_path.is_file():
+            raise ValueError('Cannot checkpoint a draft without its source image.')
+        saved_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        environment_fields = {
+            'image_url', 'content_preview_url', 'preview_dir', 'image_path',
+            'draft_saved_at', 'draft_restored', 'draft_restore_error',
+        }
+        snapshot = {key: deepcopy(value) for key, value in state.items()
+                    if key not in environment_fields}
+        document = {
+            'format': 'vietnamica-annotation-draft',
+            'version': 1,
+            'image': state['image'],
+            'inscription_code': str(state.get('code') or Path(state['image']).stem),
+            'image_size': list(state['image_size']),
+            'image_fingerprint': self._image_fingerprint(image_path),
+            'updated_at': saved_at,
+            'state': snapshot,
+        }
+        atomic_write(self._draft_path(state['image']), document)
+        state['draft_saved_at'] = saved_at
+        state['draft_restored'] = False
+        state['draft_restore_error'] = None
+        state['image_fingerprint'] = document['image_fingerprint']
+        return self._draft_path(state['image'])
+
+    def delete_draft(self, image_name):
+        self._draft_path(image_name).unlink(missing_ok=True)
+
+    def import_draft_document(self, document, image_path):
+        """Validate and install a portable draft checkpoint for one exact image."""
+        document = self.validate_draft_document(document, image_path)
+        self._draft_path(Path(image_path).name).parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(self._draft_path(Path(image_path).name), document)
+
+    def validate_draft_document(self, document, image_path):
+        """Check draft identity, image fingerprint, and editable geometry."""
+        image_path = Path(image_path).resolve()
+        if (not isinstance(document, dict)
+                or document.get('format') != 'vietnamica-annotation-draft'
+                or document.get('version') != 1
+                or document.get('image') != image_path.name
+                or document.get('inscription_code') != image_path.stem
+                or not isinstance(document.get('state'), dict)):
+            raise ValueError('The uploaded draft does not match the selected image or format.')
+        with Image.open(image_path) as image:
+            image_size = list(image.size)
+        if document.get('image_size') != image_size:
+            raise ValueError('The uploaded draft image dimensions do not match this scan.')
+        if document.get('image_fingerprint') != self._image_fingerprint(image_path):
+            raise ValueError('The uploaded draft was created from a different image file.')
+        snapshot = document['state']
+        if (snapshot.get('image') != image_path.name
+                or str(snapshot.get('code')) != image_path.stem
+                or snapshot.get('image_size') != image_size
+                or snapshot.get('current_step') not in (2, 3, 4, 6, 7)
+                or not isinstance(snapshot.get('regions'), dict)
+                or not isinstance(snapshot.get('workflow'), dict)
+                or not isinstance(snapshot.get('annotation_text'), str)):
+            raise ValueError('The uploaded draft state is incomplete or does not match this image.')
+        from .bbox import validate_coordinates
+        from .status import normalize_flags
+        for uid, region in snapshot['regions'].items():
+            if not isinstance(uid, str) or not isinstance(region, dict):
+                raise ValueError('The uploaded draft contains an invalid box.')
+            validate_coordinates(region.get('bbox'), image_size)
+            if region.get('status') not in ('intact', 'damaged'):
+                raise ValueError('The uploaded draft contains an invalid box status.')
+            candidate = deepcopy(region)
+            normalize_flags(candidate)
+        return document
+
+    def _restore_draft(self, state):
+        draft_path = self._draft_path(state['image'])
+        if not draft_path.is_file():
+            return state
+        try:
+            image_path = Path(state['image_path']).resolve()
+            document = self.validate_draft_document(read_json(draft_path),image_path)
+            snapshot = document.get('state')
+            if not isinstance(snapshot, dict):
+                raise ValueError('Saved draft state is invalid.')
+            # Image URLs and preview paths are session-local; keep the freshly
+            # generated values from open_image while restoring annotation work.
+            transient = {key: state.get(key) for key in (
+                'image_path', 'image_size', 'image_url', 'content_preview_url',
+                'preview_dir', 'image_fingerprint')}
+            state.update(deepcopy(snapshot))
+            state.update(transient)
+            state['draft_saved_at'] = document.get('updated_at')
+            state['draft_restored'] = True
+            state['draft_restore_error'] = None
+            state['image_fingerprint'] = document['image_fingerprint']
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            log.warning('Could not restore draft for %s: %s', state.get('image'), exc)
+            state['draft_restore_error'] = str(exc)
+        return state
     def _cached_source_records(self):
         """Avoid reparsing the complete extraction JSON for every opened image."""
         source = Path(self.options.source_json)
@@ -281,7 +405,7 @@ class Workflow:
             state['loaded_crop_scaled'] = list(scaled_crop)
             state['crop_saved'] = True
         log.info('Loaded image %s; extracted source ky_hieu=%s', path.name, state['code'])
-        return state
+        return self._restore_draft(state)
 
     def apply(self, original, action, payload=None):
         # Selection changes only two scalar fields. Box editing changes the
@@ -579,8 +703,8 @@ class Workflow:
                 raise ValueError('Edit statuses in the Status & Order step.')
             replace_statuses(s, payload.get('statuses'), payload.get('unknowns'), payload.get('unavailable_fonts'), payload.get('expert_predictions'), payload.get('suspiciouses'), payload.get('damage_levels'))
         elif action == 'reorder_text':
-            if step != 4:
-                raise ValueError('Edit character assignment in Step 4.')
+            if step not in (3, 4):
+                raise ValueError('Edit character assignment in Step 3 or Step 4.')
             if payload.get('token_order') is None:
                 update_text_sequence(s, payload['sequence'])
             else:
@@ -660,11 +784,12 @@ class Workflow:
             mismatch_path = self.output / 'source_mismatches' / filename
             normal_meta = self.output / '.state' / filename
             mismatch_meta = self.output / '.state' / 'source_mismatches' / filename
+            draft_path = self._draft_path(s['image'])
             # Sessions share one content registry. Roll back annotation, registry,
             # and sidecars together if a later write fails.
             with CONTENT_LOCK, rollback_saved_files([
                     self.output / '.state' / 'content.json', normal_path,
-                    mismatch_path, normal_meta, mismatch_meta]):
+                    mismatch_path, normal_meta, mismatch_meta, draft_path]):
                 save_content_document(content_doc, self.output, self.verification_titles)
                 path = (save_source_mismatch(s, self.output) if mismatch
                         else save_annotation(s, self.output))
@@ -672,6 +797,7 @@ class Workflow:
                              dict(text_hash=fingerprint(s['annotation_text']),
                                   document_hash=fingerprint(json.dumps(document, sort_keys=True, ensure_ascii=False))))
                 (normal_meta if mismatch else mismatch_meta).unlink(missing_ok=True)
+                self.delete_draft(s['image'])
             s['saved'] = True
             s['crop_saved'] = True
             log.info('Saved annotation %s', path)

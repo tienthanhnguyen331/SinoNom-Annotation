@@ -4,7 +4,8 @@ import hashlib
 from pathlib import Path
 from annotation.reading_order import build_text_sequence, suspicious_box_ids
 from annotation.state import source_mismatch_confirmed, spatial_box_order
-from annotation.text_alignment import MISSING_ANNOTATION, count_annotation_characters
+from annotation.text_alignment import (MISSING_ANNOTATION, characters,
+                                       count_annotation_characters)
 from .icons import DOCUMENT
 
 SCRIPT = (Path(__file__).parent / 'assets/editor.js').read_text()
@@ -45,6 +46,74 @@ def review_result_text(state):
         parts.append('<miss>' if missing else token)
         previous_missing = missing
     return ''.join(parts)
+
+
+def review_preflight_markup(state):
+    """Show the procedure's final manual checks without blocking valid cases."""
+    mismatch = source_mismatch_confirmed(state)
+    issue = state.get('source_mismatch') or {}
+    issue_type = issue.get('issue_type') if mismatch else None
+    character_count = count_annotation_characters(state.get('annotation_text', ''))
+    box_count = (issue.get('bounding_box_count', len(state.get('bounding_boxes', {})))
+                 if mismatch else len(state.get('bounding_boxes', {})))
+
+    def row(complete, label, detail):
+        state_class = 'complete' if complete else 'attention'
+        mark = '✓' if complete else 'Review'
+        return (f'<li class="review-check {state_class}"><span class="review-check-mark">'
+                f'{mark}</span><span><strong>{html.escape(label)}</strong> '
+                f'{html.escape(detail)}</span></li>')
+
+    if issue_type == 'other':
+        count_ok = bool(issue.get('note', '').strip())
+        count_detail = (f'Other mismatch documented with note; {character_count} source '
+                        f'characters and {box_count} boxes.')
+    elif issue_type in ('missing_text', 'extra_text'):
+        delta = abs(box_count - character_count)
+        count_ok = box_count != character_count
+        count_detail = (f'{character_count} source characters, {box_count} boxes; '
+                        f'{issue_type.replace("_", " ")} is recorded ({delta}).')
+    else:
+        count_ok = character_count == box_count and character_count > 0
+        count_detail = f'{character_count} source characters and {box_count} boxes.'
+
+    alignment_ok = bool(state.get('workflow', {}).get('alignment_valid'))
+    if issue_type == 'other':
+        alignment_ok = count_ok
+        alignment_detail = 'Other mismatch export does not contain per-character alignment.'
+    else:
+        alignment_ok = alignment_ok and (
+            len(state.get('annotations', {})) == box_count)
+        alignment_detail = ('Character-to-box mapping is verified.' if alignment_ok
+                            else 'Check the character-to-box mapping.')
+
+    damaged_without_level = [
+        box_id for box_id, box in state.get('bounding_boxes', {}).items()
+        if box.get('status') == 'damaged' and box.get('damage_level') not in (1, 2, 3)
+    ]
+    status_ok = (issue_type == 'other' or
+                 (bool(state.get('workflow', {}).get('status_valid'))
+                  and not damaged_without_level))
+    status_detail = ('All damaged boxes have a level from 1 to 3.' if status_ok
+                     else f'{len(damaged_without_level)} damaged box(es) need a level from 1 to 3.')
+
+    annotation_text = state.get('annotation_text', '')
+    notation = [char for char in '[]()<>［］（）〈〉《》' if char in annotation_text]
+    notation_detail = ('No bracket notation found in source text.' if not notation
+                       else 'Check notation brackets: ' + ''.join(dict.fromkeys(notation)))
+    newline_count = annotation_text.count('\n')
+    newline_detail = (f'{newline_count} newline(s): confirm each marks a paragraph or heading boundary.'
+                      if newline_count else 'No newline markers in source text.')
+
+    rows = [
+        row(count_ok, 'Text and box count', count_detail),
+        row(alignment_ok, 'Character alignment', alignment_detail),
+        row(status_ok, 'Damaged box levels', status_detail),
+        row(notation == [], 'Bracket notation', notation_detail),
+        row(newline_count == 0, 'Paragraph boundaries', newline_detail),
+    ]
+    return ('<section class="review-preflight"><h3>Before saving</h3><ul>'
+            + ''.join(rows) + '</ul></section>')
 
 
 def source_text(s):
@@ -121,7 +190,8 @@ def snapshot(s):
                   f'{source_w} × {source_h} px → {w} × {h} px'
                   if step == 6 and [w,h] != [source_w,source_h]
                   else f'{w} × {h} px')
-    board_class = ' status-order-board review-board' if step == 7 else ' status-order-board' if step == 4 else ''
+    board_class = (' status-order-board review-board' if step == 7 else
+                   ' status-order-board' if step in (3,4) else '')
     markup=f'''<div class="workbench-board{board_class}"><div class="workspace-toolbar">
         <div class="workspace-context"><span class="file-icon">{DOCUMENT}</span><strong>{filename}</strong><span class="dimensions">{dimensions}</span></div>
         <div class="toolbar-tools"><span class="zoom-label" aria-live="polite">100%</span>
@@ -196,17 +266,22 @@ def snapshot(s):
         suspicious_legend=('<span class="suspicious">Suspicious content</span>'
                            if suspicious_boxes else '')
         markup+=f'<div class="status-legend"><span class="intact">Intact</span><span class="damaged">Damaged</span><span class="unknown">Unknown (?)</span><span class="unavailable-font">Unavailable Font</span><span class="expert-prediction">Expert Prediction</span><span class="missing">MISS content</span>{suspicious_legend}</div>'
-    if step in (4,7) and not (step==7 and other_mismatch):
-        if step == 4:
+    if step in (3,4,7) and not (step==7 and other_mismatch):
+        if step in (3,4):
             chips=[]
             extra=(source_mismatch and s['source_mismatch']['issue_type']=='extra_text')
             values=(s['text_sequence'] if extra else
                     [s['annotations'][str(box_id)] for box_id in s['reading_order']]
-                    if s['annotations'] else [])
-            excluded_count=(len(values)-len(s['bounding_boxes']) if extra else 0)
-            # Alignment chips and their box targets follow the saved annotation
-            # order; recomputing a spatial order here would silently reassign them.
+                    if s['annotations'] else characters(s['annotation_text']))
+            assigned_box_count=(len(s['regions']) if step == 3
+                                else len(s['bounding_boxes']))
+            excluded_count=(len(values)-assigned_box_count if extra else 0)
+            # Keep the stable public box order; Step 3's canvas uses private
+            # region IDs while Step 4 uses public box IDs.
             spatial_ids=list(map(str,s.get('reading_order', [])))
+            if step == 3:
+                spatial_ids=[s.get('region_uid_by_box_id',{}).get(box_id,'')
+                             for box_id in spatial_ids]
             token_ids=list(map(str,s.get('text_token_ids',[])))
             for position,value in enumerate(values,1):
                 char=html.escape(value)
@@ -217,14 +292,16 @@ def snapshot(s):
                 token_id=(token_ids[position-1] if position<=len(token_ids) else str(position))
                 suspicious=' suspicious' if s.get('bounding_boxes', {}).get(box_id, {}).get('suspicious', False) else ''
                 assigned_box=s.get('bounding_boxes', {}).get(box_id, {})
+                if step == 3 and box_id:
+                    assigned_box=s.get('regions', {}).get(box_id,{})
                 chip_color=('#ec4899' if assigned_box.get('unavailable_font') else
                             '#facc15' if assigned_box.get('expert_prediction') else '#ffffff')
                 box_attribute=(f' data-assigned-box-id="{box_id}"' if box_id else '')
                 chips.append(f'''<button type="button" class="order-chip{missing}{excluded}{suspicious}" data-order-chip="1" data-token-id="{token_id}" data-character="{attribute_char}"{box_attribute}
                     draggable="false" aria-label="Reading position {position}: {char}" title="{char}">
-                    <span class="tile-character" style="color:{chip_color}">{char}</span></button>''')
+                    <span class="tile-order">{position}</span><span class="tile-character" style="color:{chip_color}">{char}</span></button>''')
             title='Character Assignment'
-            help_text=('Drag the text cards into the sequence that should be assigned to the spatially sorted boxes.'
+            help_text=('Click a box or character to highlight its match. Drag a character to change the assignment.'
                        if chips else 'This confirmed source mismatch has no character mapping to arrange.')
             markup+=f'''<section class="order-editor"><div class="order-heading"><div><span class="eyebrow">CHARACTER ANNOTATION</span><h2>{title}</h2></div>
 </div>
@@ -253,7 +330,7 @@ def snapshot(s):
             else:
                 review='<div class="review-text"><p>'+html.escape(review_result_text(s))+'</p></div>'
             markup+=f'''<section class="review-editor"><div class="order-heading"><div><span class="eyebrow">REVIEW & VERIFICATION</span><h2>Final Result</h2></div></div>
-                <div class="review-detail">{review}</div></section>'''
+                <div class="review-detail">{review_preflight_markup(s)}{review}</div></section>'''
     markup += '''
     <div id="sort-overwrite-modal" class="modal-backdrop" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="sort-overwrite-title">
       <div class="modal-card">
@@ -303,11 +380,15 @@ def snapshot(s):
                 mismatchConfirmed=source_mismatch,
                 mismatchBoxCount=(s.get('source_mismatch') or {}).get('bounding_box_count'),
                 readingOrder=list(s['reading_order']),
-                spatialBoxOrder=(list(s.get('reading_order', [])) if s.get('bounding_boxes') else []),
+                spatialBoxOrder=(
+                    [s.get('region_uid_by_box_id',{}).get(str(box_id),'')
+                     for box_id in s.get('reading_order',[])] if step == 3 else
+                    list(map(str,s.get('reading_order',[])))
+                    if s.get('bounding_boxes') else []),
                 selectedTokenId=(str(s['selected_token_id'])
                                  if s.get('selected_token_id') is not None else None),
                 orderedAnnotations=([s['annotations'][str(box_id)]
                                      for box_id in s['reading_order']]
                                     if s['annotations'] else []),
-                alignmentTokenIds=list(map(str,s.get('text_token_ids',[]))) if step==4 else [],
+                alignmentTokenIds=list(map(str,s.get('text_token_ids',[]))) if step in (3,4) else [],
                 max_crop_side=max(w,h), image_handle_inset=0)

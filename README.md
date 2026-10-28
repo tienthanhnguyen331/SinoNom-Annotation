@@ -14,7 +14,10 @@ Reviewers can correct source content, character locations, reading order, and da
 - **PDF text extraction:** Decode embedded glyphs and generate structured inscription records.
 - **Character detection and box editing:** Detect character regions or draw and adjust bounding boxes manually.
 - **Text alignment and reading order:** Assign characters to boxes and correct box order and text sequence.
+- **Recovery checkpoints:** In-progress work is auto-saved to a per-image draft and can be exported with a recovery ZIP.
+- **Portable restore:** Import an annotation JSON or recovery ZIP by image code; the selected records are validated against the exact scan.
 - **Damage annotation:** Label characters as intact or damaged, with light, medium, or severe damage levels and character flags.
+- **Linked box and character selection:** Select a box or its aligned character to highlight both; Ctrl/Cmd-click supports bulk status edits.
 - **Source verification:** Review text and metadata, and record missing text, extra text, or other source mismatches.
 - **Crop metadata:** Define the crop region recorded in export geometry.
 - **JSON export:** Download saved annotations, verified content, and source mismatches in one ZIP archive.
@@ -44,6 +47,10 @@ Input PDFs, inscription images, source JSON, matching reference fonts, and pretr
 6. **Review:** Inspect the final image and JSON, then save the annotation.
 
 **Download All** exports saved results as a ZIP archive.
+
+**Download Recovery Backup** also includes unfinished per-image drafts. The app checkpoints browser edits as you work and restores a valid draft when that image is reopened. To restore work on another run, upload an exported JSON file or recovery ZIP, enter the image code, and choose whether existing saved work may be replaced. A draft restore requires the same image filename, dimensions, and file fingerprint.
+
+In Steps 3 and 4, click a character tile or its box to select the pair. The selected tile is bolded, and the box shows its order number above the character to its right (or left when the image edge leaves no room on the right). In Step 4, Ctrl/Cmd-click boxes to apply the selected status or flag to several boxes at once. Boxes containing `□`, `@`, excluded text, or missing-content markers retain their rule-specific behavior.
 
 ## Getting Started
 

@@ -7,6 +7,7 @@ import logging
 import sys
 from copy import deepcopy
 from pathlib import Path
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # This directory deliberately is NOT a Python package named gradio.
@@ -17,12 +18,16 @@ from annotation.reading_order import suspicious_box_ids
 from annotation.workflow import Workflow
 from annotation.io import (final_document,
                            final_source_mismatch_document, load_image_list,
-                           read_json)
-from annotation.text_extraction import content_fields, normalize_content_titles
+                           read_json, atomic_write, rollback_saved_files,
+                           validate_document, validate_source_mismatch_document)
+from annotation.text_extraction import (content_fields, normalize_content_titles,
+                                         save_content_document,
+                                         validate_content_document)
+from annotation.importer import read_import_payload, select_image_records
 from annotation.text_alignment import count_annotation_characters
 from annotation.export import (collect_annotations, collect_content_documents,
                                collect_source_mismatches,
-                               save_export_archive)
+                               save_export_archive, save_recovery_archive)
 from ui.editor import snapshot, source_text, SCRIPT, CSS
 from ui.presentation import (APP_CSS, app_identity, workflow_progress,
                              panel_heading, panel_summary, footer,
@@ -48,6 +53,20 @@ def loading_markup(label='Loading…', visible=False):
 
 
 LOADING_HIDDEN = loading_markup()
+
+
+def draft_status_markup(state):
+    if state.get('draft_restore_error'):
+        return ('<div class="autosave-status is-warning">Draft not restored: '
+                + html.escape(str(state['draft_restore_error'])) + '</div>')
+    saved_at = state.get('draft_saved_at')
+    if saved_at:
+        label = 'Draft restored' if state.get('draft_restored') else 'Draft auto-saved'
+        return (f'<div class="autosave-status">{label} · '
+                f'{html.escape(str(saved_at))}</div>')
+    if state.get('image'):
+        return '<div class="autosave-status">Draft will auto-save as you work.</div>'
+    return ''
 FONT_PRELOAD_JS = f"""() => {{
     if (window.__vietnamicaFontsReady) return;
     window.__vietnamicaFontsReady = true;
@@ -317,6 +336,11 @@ def create_app(options):
             for image in images
         )
 
+    def has_work_to_back_up():
+        output = Path(options.output_dir)
+        return (has_saved_image_records()
+                or any((output / '.state' / 'drafts').glob('*.json')))
+
     initial=dict(active=new_state(), drafts={})
     with gr.Blocks(title='Sino-Nôm Annotation Tool', fill_width=True, analytics_enabled=False) as app:
         session=gr.State(initial)
@@ -329,6 +353,9 @@ def create_app(options):
                     save_all=gr.Button('Download All', variant='primary', scale=0,
                                         elem_id='save-all',
                                         interactive=has_saved_image_records())
+                    backup_all=gr.Button('Download Recovery Backup', scale=0,
+                                         elem_id='download-recovery-backup',
+                                         interactive=bool(images))
             workflow_chrome=gr.HTML(workflow_progress(initial['active']),
                                     elem_id='workflow-chrome')
         with gr.Group(visible=False, elem_id='history-modal') as history_modal:
@@ -360,12 +387,20 @@ def create_app(options):
                 gr.Markdown('Choose an inscription image to begin or reopen saved annotation data.')
                 image_choice=gr.Dropdown(choices=[(p.name,str(p.resolve())) for p in images],label='Image')
                 open_button=gr.Button('Start Verification', variant='primary')
+                gr.Markdown('### Restore from JSON')
+                import_file=gr.File(label='Annotation JSON or recovery ZIP',
+                                    file_types=['.json','.zip'], type='filepath')
+                import_code=gr.Textbox(label='Image code', placeholder='e.g. 33651a')
+                replace_import=gr.Checkbox(
+                    value=False, label='Replace existing records for this image')
+                import_button=gr.Button('Load Work for Image', variant='secondary')
             with gr.Column(visible=False, elem_id='control-panel', min_width=0,
                            elem_classes='panel') as control_panel:
                 heading=gr.HTML(panel_heading(initial['active']))
                 with gr.Group(elem_classes=['section','sidebar-section','sidebar-component','current-image-section']):
                     gr.Markdown('### Current image')
                     current_image=gr.Markdown('—', elem_id='current-image-name')
+                    draft_status=gr.HTML('', elem_id='draft-save-status')
                 with gr.Group(visible=False,
                               elem_classes=['section','sidebar-section','sidebar-component','content-tools']) as content_actions:
                     gr.Markdown('### Content actions')
@@ -376,6 +411,9 @@ def create_app(options):
                     selection_bridge=gr.Textbox(value='{}',show_label=False,
                                                 elem_id='selection-bridge',
                                                 elem_classes='frontend-bridge')
+                    draft_bridge=gr.Textbox(value='{}',show_label=False,
+                                            elem_id='draft-checkpoint-bridge',
+                                            elem_classes='frontend-bridge')
                     x1=gr.Number(visible=False, elem_id='bbox-x1')
                     y1=gr.Number(visible=False, elem_id='bbox-y1')
                     x2=gr.Number(visible=False, elem_id='bbox-x2')
@@ -433,6 +471,7 @@ def create_app(options):
                 with gr.Group(visible=False,
                               elem_classes=['section','sidebar-section','sidebar-component','selection-section']) as status_group:
                     gr.Markdown('### Selected region')
+                    gr.Markdown('Ctrl/Cmd-click boxes to select a group. Status and flag changes apply to every selected box.')
                     hide_canvas_overlays=gr.Checkbox(
                         value=False,label='Show image only',elem_id='show-image-only')
                     status_id=gr.Dropdown(visible=False)
@@ -522,6 +561,8 @@ def create_app(options):
         ])
         outputs.append(save_all)
         outputs.append(image_choice)
+        outputs.append(draft_status)
+        outputs.append(backup_all)
 
         def render(ctx, msg=''):
             if msg:
@@ -591,6 +632,8 @@ def create_app(options):
                     gr.update(visible=step==7 and bool(source_mismatch_json))]
             rendered.append(gr.update(interactive=has_saved_image_records()))
             rendered.append(gr.update(value=s.get('image_path') if step == 1 else None))
+            rendered.append(gr.update(value=draft_status_markup(s)))
+            rendered.append(gr.update(interactive=has_work_to_back_up() or has))
             return rendered
 
         def run(ctx, action, payload=None, auto_detect=True):
@@ -603,6 +646,8 @@ def create_app(options):
                      sorted(Path(key).name for key in ctx.get('drafts',{})))
             try:
                 updated=engine.apply(ctx['active'],action,payload)
+                if action not in ('select', 'save') and updated.get('image'):
+                    engine.save_draft(updated)
                 ctx=dict(ctx,active=updated)
                 msg=''
                 if action == 'save':gr.Info('Saved.')
@@ -616,7 +661,9 @@ def create_app(options):
                     ctx=dict(ctx,active=fresh)
                 if auto_detect and action=='next' and updated['current_step']==3 and not updated['detection_loaded'] and not skip_detection:
                     try:
-                        ctx=dict(ctx,active=engine.apply(updated,'detect'))
+                        detected=engine.apply(updated,'detect')
+                        engine.save_draft(detected)
+                        ctx=dict(ctx,active=detected)
                     except Exception as exc:
                         log.exception('Detection failed')
                         msg='Detection failed: '+str(exc)
@@ -673,6 +720,107 @@ def create_app(options):
                               path,active.get('image_path'),active.get('current_step'))
                 return render(ctx,WARNING+' '+html.escape(str(exc)))
 
+        def import_work_for_image(ctx,uploaded,code,replace_existing=False):
+            try:
+                if isinstance(uploaded,(list,tuple)):
+                    uploaded=uploaded[0] if uploaded else None
+                if not uploaded:
+                    raise ValueError('Choose an annotation JSON file or recovery ZIP first.')
+                requested=str(code or '').strip()
+                if not requested:
+                    raise ValueError('Enter the image code to restore.')
+                matches=[path for path in images if path.stem == requested]
+                if not matches and requested.isdigit():
+                    normalized=str(int(requested))
+                    matches=[path for path in images
+                             if path.stem.isdigit() and str(int(path.stem)) == normalized]
+                if len(matches) != 1:
+                    raise ValueError(
+                        f'Image code {requested} matches {len(matches)} files; expected exactly one.'
+                    )
+                image_path=matches[0].resolve()
+                selected=select_image_records(
+                    read_import_payload(uploaded),requested,image_path.name)
+                content=selected['content']
+                annotation=selected['annotation']
+                mismatch=selected['mismatch']
+                draft=selected['draft']
+                if content is not None:
+                    validate_content_document(
+                        content,image_path.name,engine.verification_titles)
+                    if content.get('inscription_code') != image_path.stem:
+                        raise ValueError('Imported content code does not match the selected image.')
+                with Image.open(image_path) as image:
+                    size=list(image.size)
+                if annotation is not None:
+                    validate_document(annotation,image_path.name,size)
+                if mismatch is not None:
+                    validate_source_mismatch_document(mismatch,image_path.name,size)
+                if draft is not None:
+                    engine.validate_draft_document(draft,image_path)
+
+                output=Path(options.output_dir)
+                normal_path=output/(image_path.stem+'.json')
+                mismatch_path=output/'source_mismatches'/(image_path.stem+'.json')
+                normal_meta=output/'.state'/(image_path.stem+'.json')
+                mismatch_meta=output/'.state'/'source_mismatches'/(image_path.stem+'.json')
+                draft_path=engine._draft_path(image_path.name)
+                content_registry=output/'.state'/'content.json'
+                conflicts=[]
+                if annotation is not None and (normal_path.exists() or mismatch_path.exists()):
+                    conflicts.append('saved annotation')
+                if mismatch is not None and (normal_path.exists() or mismatch_path.exists()):
+                    conflicts.append('saved annotation or mismatch')
+                if content is not None and content_registry.exists():
+                    existing_content=read_json(content_registry)
+                    if any(isinstance(item,dict) and item.get('image') == image_path.name
+                           for item in existing_content):
+                        conflicts.append('saved content')
+                if (draft is None and draft_path.exists()
+                        and any(record is not None for record in
+                                (content, annotation, mismatch))):
+                    conflicts.append('saved draft')
+                if draft is not None and draft_path.exists():
+                    conflicts.append('saved draft')
+                if conflicts and not replace_existing:
+                    raise ValueError(
+                        'This image already has ' + ', '.join(conflicts)
+                        + '. Select “Replace existing saved work” to overwrite it.'
+                    )
+
+                transaction_paths=[content_registry,normal_path,mismatch_path,
+                                   normal_meta,mismatch_meta,draft_path]
+                with rollback_saved_files(transaction_paths):
+                    if content is not None:
+                        save_content_document(
+                            content,output,engine.verification_titles)
+                    if annotation is not None:
+                        atomic_write(normal_path,annotation)
+                        mismatch_path.unlink(missing_ok=True)
+                        normal_meta.unlink(missing_ok=True)
+                        mismatch_meta.unlink(missing_ok=True)
+                    elif mismatch is not None:
+                        atomic_write(mismatch_path,mismatch)
+                        normal_path.unlink(missing_ok=True)
+                        normal_meta.unlink(missing_ok=True)
+                        mismatch_meta.unlink(missing_ok=True)
+                    if draft is not None:
+                        engine.import_draft_document(draft,image_path)
+                    elif (annotation is not None or mismatch is not None
+                          or (content is not None and replace_existing)):
+                        engine.delete_draft(image_path.name)
+
+                ctx=deepcopy(ctx)
+                old_revision=ctx.get('active',{}).get('revision',0)
+                state=engine.open_image(image_path)
+                state['revision']=old_revision+1
+                ctx['drafts'].pop(str(image_path),None)
+                ctx['active']=state
+                return render(ctx,f'Loaded work for {image_path.name}.')
+            except Exception as exc:
+                log.exception('Could not import work for image code=%s',code)
+                return render(ctx,WARNING+' '+html.escape(str(exc)))
+
         # Hide Gradio's per-component timers/spinners and show one centered modal instead.
         event_args=dict(outputs=outputs,concurrency_id='annotation-actions',concurrency_limit=1,
                         show_progress='hidden',js=SHOW_LOADING_JS)
@@ -714,6 +862,37 @@ def create_app(options):
                     annotations,content,options.output_dir,mismatches)
                 return json.dumps({'name':archive.name,
                                    'content':base64.b64encode(archive.read_bytes()).decode('ascii')})
+            except (ValueError,OSError,KeyError,TypeError) as exc:
+                raise gr.Error(str(exc)) from exc
+
+        def save_recovery_folder(ctx, content_draft=None, selection='{}'):
+            try:
+                active=ctx.get('active',{})
+                if active.get('image') and active.get('current_step') == 2:
+                    ctx=commit_frontend_content(ctx,content_draft)
+                    engine.save_draft(ctx['active'])
+                elif active.get('image') and active.get('current_step') in (3,4,6):
+                    ctx,status_markup,_=autosave_frontend_draft(ctx,selection)
+                    if 'is-warning' in status_markup:
+                        raise ValueError('Could not checkpoint the current browser edits before backup.')
+                elif active.get('image'):
+                    engine.save_draft(active)
+                annotations=collect_annotations(images,options.output_dir,allow_empty=True)
+                committed_images=[
+                    image for image in images
+                    if ((Path(options.output_dir)/(Path(image).stem+'.json')).exists()
+                        or (Path(options.output_dir)/'source_mismatches'/(Path(image).stem+'.json')).exists())
+                ]
+                content=collect_content_documents(
+                    committed_images,options.output_dir,allow_empty=True,
+                    titles=engine.verification_titles)
+                mismatches=collect_source_mismatches(images,options.output_dir,allow_empty=True)
+                archive=save_recovery_archive(
+                    annotations,content,options.output_dir,mismatches)
+                payload=json.dumps({'name':archive.name,
+                                    'content':base64.b64encode(archive.read_bytes()).decode('ascii')})
+                return (payload,ctx,draft_status_markup(ctx.get('active',{})),
+                        gr.update(interactive=has_work_to_back_up()))
             except (ValueError,OSError,KeyError,TypeError) as exc:
                 raise gr.Error(str(exc)) from exc
 
@@ -766,9 +945,7 @@ def create_app(options):
         history_clear.click(fn=None,inputs=[history_filter],outputs=[history_search],
                             show_progress='hidden',js=HISTORY_CLEAR_JS)
 
-        save_all.click(save_folder,[],[download_payload],concurrency_id='annotation-actions',concurrency_limit=1,
-                       show_progress='hidden',js=SHOW_LOADING_JS).success(
-            fn=None,inputs=[download_payload],outputs=None,js="""(payload) => {
+        download_js="""(payload) => {
                 document.getElementById('global-loading')?.classList.remove('is-visible');
                 if (!payload) return;
                 const archive=JSON.parse(payload);
@@ -779,8 +956,21 @@ def create_app(options):
                 const link=document.createElement('a');link.href=url;link.download=archive.name;
                 document.body.appendChild(link);link.click();link.remove();
                 setTimeout(()=>URL.revokeObjectURL(url),10000);
-            }""")
+            }"""
+        save_all.click(save_folder,[],[download_payload],concurrency_id='annotation-actions',concurrency_limit=1,
+                       show_progress='hidden',js=SHOW_LOADING_JS).success(
+            fn=None,inputs=[download_payload],outputs=None,js=download_js)
+        clear_loading_when_done(backup_all.click(save_recovery_folder,
+                         [session,content_bridge,draft_bridge],
+                         [download_payload,session,draft_status,backup_all],
+                         concurrency_id='annotation-actions',concurrency_limit=1,
+                         show_progress='hidden',
+                         js=snapshot_board_state_js(2)).success(
+            fn=None,inputs=[download_payload],outputs=None,js=download_js))
         clear_loading_when_done(open_button.click(open_image,[session,image_choice],**event_args))
+        clear_loading_when_done(import_button.click(
+            import_work_for_image,
+            [session,import_file,import_code,replace_import],**event_args))
         for button,action in [(back,'back'),(save,'save'),(undo,'undo')]:
             clear_loading_when_done(button.click(lambda c,a=action:run(c,a),[session],**event_args))
         def commit_frontend_content(ctx,draft):
@@ -808,6 +998,32 @@ def create_app(options):
                 return dict(ctx,active=updated)
             except (ValueError,TypeError,AttributeError) as exc:
                 raise ValueError(str(exc)) from exc
+
+        def save_content_draft(ctx, draft):
+            updated = commit_frontend_content(ctx, draft)
+            engine.save_draft(updated['active'])
+            return (updated, draft_status_markup(updated['active']),
+                    gr.update(interactive=has_work_to_back_up()))
+
+        def apply_content_draft(ctx, path, value, draft):
+            try:
+                fields = json.loads(draft or '{}')
+                key = json.dumps(path, ensure_ascii=False)
+                if (not isinstance(fields, dict) or key not in fields
+                        or not isinstance(value, str)):
+                    raise ValueError('Select a content section and enter text first.')
+                fields[key]['value'] = value
+                serialized = json.dumps(fields, ensure_ascii=False)
+                updated = commit_frontend_content(ctx, serialized)
+                engine.save_draft(updated['active'])
+                preview_value = json.dumps([
+                    dict(tieu_de=item['title'], van_ban=item['value'])
+                    for item in fields.values()], ensure_ascii=False, indent=2)
+                return (updated, serialized, preview_value,
+                        draft_status_markup(updated['active']),
+                        gr.update(interactive=has_work_to_back_up()))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise gr.Error(str(exc)) from exc
 
         def next_step(ctx, content_draft=None, auto_detect=True,
                       issue_type=None, mismatch_note_value='', selection='{}',
@@ -888,22 +1104,71 @@ def create_app(options):
              selection_bridge,status,x1,y1,x2,y2,crop_coords],
             **dict(event_args,js=snapshot_board_state_js(4))))
         field.change(
-            fn=None,inputs=[field,content_bridge],outputs=[field_value],queue=False,
+            fn=None,inputs=[field,content_bridge],
+            outputs=[field_value,content_bridge,content_preview],queue=False,
             js="""(path, draft) => {
-                try { return JSON.parse(draft || '{}')?.[path]?.value ?? ''; }
-                catch (_) { return ''; }
+                let fields={};
+                try { fields=JSON.parse(draft || '{}'); } catch (_) {}
+                const image=(document.querySelector('#current-image-name')?.textContent || '')
+                    .replaceAll('`','').trim();
+                try {
+                    const pending=JSON.parse(localStorage.getItem(
+                        `vietnamica-content-draft:${image}`) || '{}');
+                    Object.entries(pending).forEach(([key,item]) => {
+                        if (fields[key] && typeof item?.value === 'string')
+                            fields[key].value=item.value;
+                    });
+                } catch (_) {}
+                const preview=Object.values(fields).map(
+                    field => ({tieu_de:field.title, van_ban:field.value}));
+                return [fields[path]?.value ?? '', JSON.stringify(fields),
+                        JSON.stringify(preview,null,2)];
             }""",show_progress='hidden')
-        apply_field.click(
-            fn=None,inputs=[field,field_value,content_bridge],
-            outputs=[content_bridge,content_preview],queue=False,
+        field_value.input(
+            fn=None, inputs=[field,field_value,content_bridge],
+            outputs=[content_bridge,content_preview], queue=False,
             js="""(path, value, draft) => {
                 let fields={};
                 try { fields=JSON.parse(draft || '{}'); } catch (_) {}
                 if (fields[path]) fields[path].value=String(value ?? '');
+                const image=(document.querySelector('#current-image-name')?.textContent || '')
+                    .replaceAll('`','').trim();
+                try {
+                    const key=`vietnamica-content-draft:${image}`;
+                    const pending=JSON.parse(localStorage.getItem(key) || '{}');
+                    pending[path]={value:String(value ?? ''),updated_at:Date.now()};
+                    localStorage.setItem(key,JSON.stringify(pending));
+                } catch (_) {}
                 const preview=Object.values(fields).map(
                     field => ({tieu_de:field.title, van_ban:field.value}));
-                return [JSON.stringify(fields), JSON.stringify(preview,null,2)];
-            }""",show_progress='hidden')
+                return [JSON.stringify(fields),JSON.stringify(preview,null,2)];
+            }""", show_progress='hidden')
+        field_value.blur(
+            fn=save_content_draft, inputs=[session,content_bridge],
+            outputs=[session,draft_status,backup_all], concurrency_id='annotation-actions',
+            concurrency_limit=1, show_progress='hidden').success(
+            fn=None, inputs=[], outputs=[], show_progress='hidden',
+            js="""(...args) => {
+                const image=(document.querySelector('#current-image-name')?.textContent || '')
+                    .replaceAll('`','').trim();
+                try { localStorage.removeItem(`vietnamica-content-draft:${image}`); }
+                catch (_) {}
+                return args;
+            }""")
+        apply_field.click(
+            fn=apply_content_draft,
+            inputs=[session,field,field_value,content_bridge],
+            outputs=[session,content_bridge,content_preview,draft_status,backup_all],
+            concurrency_id='annotation-actions',concurrency_limit=1,
+            show_progress='hidden').success(
+            fn=None, inputs=[], outputs=[], show_progress='hidden',
+            js="""(...args) => {
+                const image=(document.querySelector('#current-image-name')?.textContent || '')
+                    .replaceAll('`','').trim();
+                try { localStorage.removeItem(`vietnamica-content-draft:${image}`); }
+                catch (_) {}
+                return args;
+            }""")
         def frontend_selection(value):
             try:
                 parsed=json.loads(value or '{}')
@@ -1075,11 +1340,55 @@ def create_app(options):
             # against that sequence, rather than the preceding token positions.
             return commit_statuses(candidate, selection, status_value)
 
+        def autosave_frontend_draft(ctx, selection):
+            try:
+                parsed=json.loads(selection or '{}')
+                active=ctx.get('active',{})
+                if (not active.get('image')
+                        or parsed.get('image') not in (None,active.get('image'))):
+                    return (ctx,draft_status_markup(active),
+                            gr.update(interactive=has_work_to_back_up()))
+                step=active.get('current_step')
+                if step == 3 and isinstance(parsed.get('boxes'),dict):
+                    ctx,_,_=commit_frontend_boxes(ctx,selection)
+                    if (parsed.get('textSequence') and parsed.get('tokenOrder')
+                            and ctx['active']['workflow'].get('alignment_valid')):
+                        updated=engine.apply(ctx['active'],'reorder_text',{
+                            'sequence':parsed['textSequence'],
+                            'token_order':parsed['tokenOrder'],
+                        })
+                        ctx=dict(ctx,active=updated)
+                elif step == 4:
+                    ctx=commit_status_order(ctx,selection,'intact')
+                elif step == 6:
+                    crop_value=frontend_crop(selection)
+                    if crop_value is not None:
+                        updated=engine.apply(active,'crop',{'bbox':crop_value})
+                        ctx=dict(ctx,active=updated)
+                else:
+                    return (ctx,draft_status_markup(active),
+                            gr.update(interactive=has_work_to_back_up()))
+                engine.save_draft(ctx['active'])
+                return (ctx,draft_status_markup(ctx['active']),
+                        gr.update(interactive=has_work_to_back_up()))
+            except Exception as exc:
+                log.exception('Draft autosave failed')
+                active=ctx.get('active',{})
+                return (ctx,('<div class="autosave-status is-warning">Autosave failed: '
+                            + html.escape(str(exc)) + '</div>'),
+                        gr.update(interactive=has_work_to_back_up()))
+
+        draft_bridge.input(
+            autosave_frontend_draft,[session,draft_bridge],
+            [session,draft_status,backup_all],concurrency_id='annotation-actions',
+            concurrency_limit=1,show_progress='hidden')
+
         def apply_status_changes(ctx, selection, status_value):
             try:
                 from annotation.status import require_damage_levels
                 candidate = commit_status_order(ctx, selection, status_value)
                 require_damage_levels(candidate['active'])
+                engine.save_draft(candidate['active'])
                 return render(candidate)
             except Exception as exc:
                 result = render(ctx, WARNING+' '+html.escape(str(exc)))

@@ -22,6 +22,16 @@
   background-color: var(--color-panel);
 }
 
+.autosave-status { color: var(--color-muted, #a1a1aa); font-size: 10px; line-height: 1.5; }
+.autosave-status.is-warning { color: #fca5a5; }
+.review-preflight { margin-bottom: var(--space-4, 16px); }
+.review-preflight h3 { margin: 0 0 var(--space-2, 8px); font-size: 12px; }
+.review-preflight ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.review-check { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 8px; color: var(--color-muted, #a1a1aa); font-size: 10px; line-height: 1.45; }
+.review-check strong { color: var(--color-text, #f4f4f5); }
+.review-check.complete .review-check-mark { color: #86efac; }
+.review-check.attention .review-check-mark { color: #fbbf24; }
+
 .workspace-toolbar {
   display: flex;
   align-items: center;
@@ -336,6 +346,8 @@
 .order-chip.suspicious { border-color: #facc15; background: #a16207; color: #fff; }
 .order-chip.suspicious:hover { border-color: #fde047; background: #ca8a04; color: #fff; }
 .order-chip.selected-chip { outline: 2px solid var(--color-accent, #ff7a1a); outline-offset: 2px; }
+.order-chip.selected-chip .tile-order,
+.order-chip.selected-chip .tile-character { font-weight: 700; }
 .order-chip.suspicious.selected-chip { border-color: #fde047; outline-color: #fff; }
 .order-chip.excluded:hover { border-color: #71717a; background: #303033; color: #a1a1aa; }
 .order-chip.dragging {
