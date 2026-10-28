@@ -173,6 +173,7 @@ const policyContext = {
   props: {value: {step: 4}}, localBoxes: {'1': policyBox}, activeBoxId: '1', activeTokenId: null,
   selectedIds: new Set(['1']), localTextSequence: ['□'], root: policyRoot,
   syncingStatusControl: false, setInputValue: () => {}, updateValidationSummary: () => {},
+  scheduleDraftCheckpoint: () => {},
   serializeLocalBoxes: () => ({'1': policyBox}), renderLocalStatus: () => {},
   element: {querySelector: selector => selector.startsWith('[data-order-chip]') ? policyChip : null,
     querySelectorAll: () => []},

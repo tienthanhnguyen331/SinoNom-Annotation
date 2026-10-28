@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -39,13 +40,14 @@ class TextDetectionTests(unittest.TestCase):
         process.poll.return_value = None
         process.pid = 42
         model = det_model('/tmp/det_model')
+        executable_path = os.path.abspath('/tmp/det_model')
         with patch('text_detection.runtime.det_wrapper.subprocess.Popen', return_value=process) as popen, \
              patch('text_detection.runtime.det_wrapper.time.sleep'), \
              patch.object(model, '_connect_with_retry', return_value=True):
             model.start()
 
         popen.assert_called_once_with(
-            ['/tmp/det_model', '12345'],
+            [executable_path, '12345'],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

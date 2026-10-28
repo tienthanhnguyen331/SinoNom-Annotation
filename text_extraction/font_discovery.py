@@ -148,7 +148,13 @@ def embedded_type0_font_names(pdf_path: Path) -> tuple[str, ...]:
 
 def _config_relative_path(reference_path: Path, config_path: Path) -> str:
     """Store reference paths relative to the config, so it remains portable."""
-    return os.path.relpath(reference_path, config_path.resolve().parent)
+    reference_path = reference_path.resolve()
+    try:
+        return os.path.relpath(reference_path, config_path.resolve().parent)
+    except ValueError:
+        # Windows cannot express a relative path between different drives.
+        # Keep the discovered font usable instead of failing the refresh.
+        return str(reference_path)
 
 
 def synchronize_encoded_fonts(config_path: Path) -> FontDiscoveryResult:

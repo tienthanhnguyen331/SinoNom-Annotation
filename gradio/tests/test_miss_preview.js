@@ -8,6 +8,7 @@ const extract = (start, end) => script.slice(script.indexOf(start), script.index
 class Node {
   constructor() {
     this.dataset = {}; this.attrs = {}; this.children = []; this.style = {};
+    this._textContent = '';
     this.classes = new Set();
     this.classList = {
       contains: key => this.classes.has(key),
@@ -15,6 +16,15 @@ class Node {
       remove: key => this.classes.delete(key),
       add: key => this.classes.add(key),
     };
+  }
+  get textContent() {
+    return this.children.length
+      ? this.children.map(node => node.textContent).join('') : this._textContent;
+  }
+  set textContent(value) {
+    this.children.forEach(node => { node.parent = null; });
+    this.children = [];
+    this._textContent = String(value);
   }
   setAttribute(key, value) { this.attrs[key] = String(value); }
   getAttribute(key) { return this.attrs[key]; }
@@ -98,7 +108,13 @@ function check(expected) {
     assert.equal(marks.length, Number(missing));
     assert.equal(group.rect.attrs.fill, missing ? '#e5e7eb' : '#22c55e');
     assert.equal(group.rect.attrs['fill-opacity'], missing ? '.30' : '.04');
-    assert.equal(group.label.textContent, `${index + 1} ${container.children[index].dataset.character}`);
+    if (group.label.classList.contains('active-character-callout')) {
+      assert.deepEqual(group.label.children.map(node => node.textContent),
+        [String(index + 1), container.children[index].dataset.character]);
+    } else {
+      assert.equal(group.label.textContent,
+        `${index + 1} ${container.children[index].dataset.character}`);
+    }
     if (missing) {
       assert.equal(marks[0].children.length, 2);
       const x = boxes[group.dataset.boxId].bbox[0];

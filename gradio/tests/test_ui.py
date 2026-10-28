@@ -497,8 +497,9 @@ class GradioCallbacks(unittest.TestCase):
         titles=['Nguyên văn chữ Hán Nôm','Phiên âm Hán Việt','Dịch nghĩa','Toát yếu','Chú thích']
         app_source=(Path(__file__).resolve().parents[1]/'app.py').read_text()
         self.assertIn("field=gr.Dropdown(label='Section', filterable=False)",app_source)
-        self.assertIn('fn=None,inputs=[field,content_bridge],outputs=[field_value],queue=False,',app_source)
-        self.assertIn('fn=None,inputs=[field,field_value,content_bridge],',app_source)
+        self.assertIn('outputs=[field_value,content_bridge,content_preview],queue=False,',app_source)
+        self.assertIn('outputs=[content_bridge,content_preview], queue=False,',app_source)
+        self.assertIn('parsed_path = json.loads(path) if isinstance(path, str) else path',app_source)
         self.assertIn('def commit_frontend_content(ctx,draft):',app_source)
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder).resolve()

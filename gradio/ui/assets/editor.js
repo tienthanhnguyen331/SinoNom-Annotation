@@ -321,7 +321,8 @@ const syncExternalControls = () => {
           syncingStatusControl = true;
           try { input.click(); } finally { syncingStatusControl = false; }
         }
-        input.disabled = isMissing || isUnknownPlaceholder || isFontPlaceholder;
+        input.disabled = isMissing || isUnknownPlaceholder
+          || (flag === 'unavailable_font' && isFontPlaceholder);
       });
     }
     const unknownRadioInputs = root.querySelectorAll('#unknown-radio input');
@@ -804,9 +805,11 @@ root.addEventListener('change', event => {
       targets.forEach(id => {
         const box = localBoxes[id];
         const chip = element.querySelector(`[data-order-chip][data-assigned-box-id="${id}"]`);
+        const character = chip?.dataset.character;
         if (!box || groupFor(id)?.querySelector('rect')?.dataset.missing === '1'
             || chip?.classList.contains('missing') || chip?.classList.contains('excluded')
-            || ['□', '@'].includes(chip?.dataset.character)) return;
+            || character === '□'
+            || (character === '@' && flag === 'unavailable_font')) return;
         if (flag === 'expert_prediction' && enabled && !box[flag]) box.status = 'damaged';
         box[flag] = enabled;
         if (enabled) box.unknown = false;

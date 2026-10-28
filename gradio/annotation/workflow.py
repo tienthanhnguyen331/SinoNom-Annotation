@@ -196,7 +196,7 @@ class Workflow:
         if (snapshot.get('image') != image_path.name
                 or str(snapshot.get('code')) != image_path.stem
                 or snapshot.get('image_size') != image_size
-                or snapshot.get('current_step') not in (2, 3, 4, 6, 7)
+                or snapshot.get('current_step') not in (2, 3, 4, 5, 6, 7)
                 or not isinstance(snapshot.get('regions'), dict)
                 or not isinstance(snapshot.get('workflow'), dict)
                 or not isinstance(snapshot.get('annotation_text'), str)):
