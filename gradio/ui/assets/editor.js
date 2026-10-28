@@ -983,6 +983,15 @@ const setSelection = (ids, active = null, sync = true) => {
   renderSelection(sync);
   updateCanvasLabels();
 };
+const activateOrderChip = chip => {
+  const tokenId = chip.dataset.tokenId || null;
+  const assignedId = chip.dataset.assignedBoxId;
+  const boxId = assignedId && localBoxes[assignedId] ? assignedId : null;
+  setSelection(boxId ? [boxId] : [], boxId);
+  activeTokenId = tokenId;
+  renderSelection(false);
+  updateCanvasLabels();
+};
 root.addEventListener('deselect-regions', () => setSelection([], null));
 const createOverlayRect = (svg, className) => {
   const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
@@ -1305,19 +1314,21 @@ const handleOrderLostPointerCapture = event => {
 
 element.addEventListener('pointerdown', event => {
   if (pending) return;
+  const startPan = () => {
+    const viewport = element.querySelector('.image-viewport');
+    if (!viewport) return false;
+    moving = {
+      kind: 'pan', viewport,
+      startX: event.clientX, startY: event.clientY,
+      scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop
+    };
+    try { element.setPointerCapture(event.pointerId); } catch (_) {}
+    event.preventDefault();
+    return true;
+  };
   const isPan = event.button === 1 || (event.button === 0 && (spacePressed || (event.shiftKey && !event.target.closest('[data-box-id]'))));
   if (isPan) {
-    const viewport = element.querySelector('.image-viewport');
-    if (viewport) {
-      moving = {
-        kind: 'pan', viewport,
-        startX: event.clientX, startY: event.clientY,
-        scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop
-      };
-      element.setPointerCapture(event.pointerId);
-      event.preventDefault();
-      return;
-    }
+    if (startPan()) return;
   }
   if (event.button !== 0) return;
   const chip = event.target.closest('[data-order-chip]');
@@ -1325,6 +1336,7 @@ element.addEventListener('pointerdown', event => {
     const container = chip.closest('.order-chips');
     if (!alignmentStateReady || container !== alignmentContainer
         || container?.dataset.alignmentReady !== 'true') return;
+    activateOrderChip(chip);
     if (orderDrag) cleanupOrderDrag('superseded', false);
     orderDrag = {
       active: true, chip, container, pointerId: event.pointerId,
@@ -1361,7 +1373,7 @@ element.addEventListener('pointerdown', event => {
         updateCanvasLabels();
       }
       if (mode !== 3) {
-        event.preventDefault(); return;
+        startPan(); return;
       }
       const p = point(event, svg);
       const cornerAttr = event.target.getAttribute('data-corner') ?? event.target.dataset?.corner;
@@ -1376,7 +1388,12 @@ element.addEventListener('pointerdown', event => {
         };
       }
     } else {
-      if (mode === 4) { setSelection([], null); event.preventDefault(); return; }
+      if (mode === 4) {
+        setSelection([], null);
+        startPan();
+        return;
+      }
+      if ([5, 7].includes(mode)) { startPan(); return; }
       const p = point(event, svg);
       if (mode === 3 && event.altKey) {
         moving = { kind: 'add', svg, p, rect: createOverlayRect(svg, 'selection-marquee') };
@@ -1677,6 +1694,13 @@ root.addEventListener('click', event => {
     event.stopPropagation();
     suppressAlignmentClick = false;
     clearTimeout(alignmentClickTimer);
+    return;
+  }
+  const chip = event.target.closest('[data-order-chip]');
+  if (chip && [3, 4].includes(props.value.step)) {
+    // Keep chip selection usable even while Gradio is replacing alignment DOM.
+    // Reordering remains gated until token and box IDs have been verified.
+    activateOrderChip(chip);
     return;
   }
   const nextBtn = event.target.closest('#next-button, #next-step, .next-button, [elem_id="next-button"]');

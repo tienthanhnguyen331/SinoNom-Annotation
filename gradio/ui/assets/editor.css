@@ -304,8 +304,6 @@
   scrollbar-color: #4a4d53 transparent;
   scrollbar-width: thin;
 }
-.order-chips[data-alignment-ready="false"] { pointer-events: none; }
-
 .order-chip {
   display: inline-flex;
   flex: 0 0 auto;

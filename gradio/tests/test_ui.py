@@ -365,7 +365,7 @@ class GradioCallbacks(unittest.TestCase):
         self.assertIn('expectedIds.every(id => tokenIds.includes(id))',editor_js)
         self.assertIn('container?.dataset.alignmentReady !== \'true\'',editor_js)
         self.assertIn('new MutationObserver(() => {',editor_js)
-        self.assertIn('.order-chips[data-alignment-ready="false"] { pointer-events: none; }',editor_css)
+        self.assertNotIn('.order-chips[data-alignment-ready="false"] { pointer-events: none; }',editor_css)
 
     def test_box_count_changes_invalidate_mismatch_confirmation(self):
         app_source=(Path(__file__).resolve().parents[1]/'app.py').read_text()
