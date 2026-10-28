@@ -14,6 +14,7 @@ let alignmentBoxGroups = [];
 let mismatchConfirmationInvalidated = false;
 let nextTemporaryBoxId = 1;
 let annotationColor = '#f4f4f5';
+const selectionAccentColor = '#ff7a1a';
 const annotationColors = {
   White: '#f4f4f5', Cyan: '#22d3ee', Amber: '#f59e0b',
   Violet: '#a78bfa', Pink: '#f472b6',
@@ -159,15 +160,15 @@ const statusFillOpacity = (box, missing, suspicious) =>
 const applyAnnotationColor = () => {
   if (props.value.step !== 3) return;
   element.querySelectorAll('.annotation-canvas [data-box-id]').forEach(group => {
+    const color = selectedIds.has(group.dataset.boxId)
+      ? selectionAccentColor : annotationColor;
     const rect = group.querySelector('rect:not([data-image-resize-handle])');
     if (rect) {
-      if (props.value.step === 3) {
-        rect.setAttribute('fill', annotationColor);
-        rect.setAttribute('stroke', annotationColor);
-      }
+      rect.setAttribute('fill', color);
+      rect.setAttribute('stroke', color);
     }
     const label = group.querySelector('[data-box-order-label]');
-    if (label) label.setAttribute('fill', annotationColor);
+    if (label) label.setAttribute('fill', color);
   });
 };
 const readAnnotationColor = () => {
@@ -448,6 +449,11 @@ const renderSelection = (sync = true) => {
     if (rect) {
       const suspicious = group.classList.contains('suspicious-region');
       const missing = rect.dataset.missing === '1';
+      if (props.value.step === 3) {
+        const highlight = selected ? selectionAccentColor : annotationColor;
+        rect.setAttribute('fill', highlight);
+        rect.setAttribute('stroke', highlight);
+      }
       rect.setAttribute('fill-opacity', props.value.step >= 4
         ? statusFillOpacity(localBoxes[id], missing, suspicious)
         : selected ? '.16' : '.04');
